@@ -28,56 +28,52 @@ public static class ModEntry
     public const float FastSpeed = 10.0f;
     public static bool IsEnabled = true;
     
-    public static long TransitionStartedAt = 0;
-    public const long TransitionExpiryMs = 2000;
+    // Use a real-time timestamp to create a "Lockout" period for transitions
+    private static long _transitionLockUntil = 0;
+
+    public static void StartTransitionLock(float durationSeconds)
+    {
+        // We lock the speed to 1.0x for slightly longer than the transition itself
+        long bufferMs = 200; 
+        _transitionLockUntil = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + (long)(durationSeconds * 1000) + bufferMs;
+    }
+
+    public static bool IsInTransitionLock()
+    {
+        if (_transitionLockUntil == 0) return false;
+        long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        if (now > _transitionLockUntil)
+        {
+            _transitionLockUntil = 0;
+            return false;
+        }
+        return true;
+    }
 
     [ThreadStatic]
     private static bool _isCheckingState = false;
-
-    public static bool IsInTransition()
-    {
-        if (_isCheckingState) return false;
-        _isCheckingState = true;
-        try {
-            // ULTIMATE GROUND TRUTH: Direct access to the game's internal transition state.
-            // This is perfectly synced with the actual screen animations.
-            if (NGame.Instance?.Transition != null)
-            {
-                if (NGame.Instance.Transition.InTransition) return true;
-            }
-
-            // FALLBACK: Timestamp-based expiry
-            if (TransitionStartedAt == 0) return false;
-            long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            if (now - TransitionStartedAt > TransitionExpiryMs)
-            {
-                TransitionStartedAt = 0;
-                return false;
-            }
-            return true;
-        } finally {
-            _isCheckingState = false;
-        }
-    }
 
     public static bool IsSafeForInstantSpeed()
     {
         if (_isCheckingState) return false;
         _isCheckingState = true;
         try {
-            // Check for combat room first (Proactive)
+            // Priority 1: If we are in a transition lock, it is NOT safe for instant speed.
+            if (IsInTransitionLock()) return false;
+
+            // Priority 2: Combat Room check
             if (NCombatRoom.Instance != null && !NCombatRoom.Instance.IsQueuedForDeletion()) 
             {
                 if (CombatManager.Instance != null && CombatManager.Instance.IsEnding) return false;
                 return true;
             }
 
+            // Priority 3: Event check
             if (RunManager.Instance == null) return true;
             var state = RunManager.Instance.DebugOnlyGetState();
             if (state?.CurrentRoom == null) return true;
             
-            var room = state.CurrentRoom;
-            if (room is EventRoom) return false;
+            if (state.CurrentRoom is EventRoom) return false;
             
             return true;
         } catch {
@@ -121,7 +117,7 @@ public static class ModEntry
         if (_initialized) return;
         _initialized = true;
 
-        LogDebug("v1.3.13 - SCENE-SYNCED ANTI-FLICKER (Transition.InTransition)...");
+        LogDebug("v1.3.14 - FIXED TRANSITION FADES (Time-Locked Logic)...");
 
         try {
             var harmony = new Harmony("com.instantmode.mod");
@@ -133,7 +129,7 @@ public static class ModEntry
             manager.Name = "InstantModeSpeedManager";
             NGame.Instance?.CallDeferred(Node.MethodName.AddChild, manager);
 
-            LogDebug("Init complete. Flicker-prevention now hardware synced.");
+            LogDebug("Init complete. Transitions now hardware-timed for smoothness.");
         } catch (Exception ex) {
             LogDebug($"FATAL INIT ERROR: {ex}");
         }
@@ -144,8 +140,7 @@ public static class ModEntry
         try {
             var saveManagerType = AccessTools.TypeByName("MegaCrit.Sts2.Core.Saves.SaveManager");
             var prefsSaveProp = AccessTools.Property(saveManagerType, "PrefsSave");
-            var prefsSaveType = prefsSaveProp.PropertyType;
-            var fastModeProp = AccessTools.Property(prefsSaveType, "FastMode");
+            var fastModeProp = AccessTools.Property(prefsSaveProp.PropertyType, "FastMode");
             var getter = fastModeProp.GetGetMethod();
             var prefix = AccessTools.Method(typeof(FastModeGetterPatch), nameof(FastModeGetterPatch.Prefix));
             harmony.Patch(getter, new HarmonyMethod(prefix));
@@ -159,7 +154,7 @@ public static class ModEntry
         try {
             IsEnabled = !IsEnabled;
             LogDebug($"Toggle -> {IsEnabled}");
-            TransitionStartedAt = 0;
+            _transitionLockUntil = 0;
             if (NGame.Instance != null)
             {
                 NGame.Instance.AddChild(NFullscreenTextVfx.Create(IsEnabled ? "Instant Mode: ON" : "Instant Mode: OFF"));
@@ -182,7 +177,8 @@ public static class FastModeGetterPatch
 
         _isInsideGetter = true;
         try {
-            if (ModEntry.IsInTransition())
+            // We use the transition lock to force "Fast" mode (returning the fades).
+            if (ModEntry.IsInTransitionLock())
             {
                 __result = FastModeType.Fast;
                 return false;
@@ -214,9 +210,9 @@ public partial class SpeedManager : Node
             }
 
             bool isSafe = ModEntry.IsSafeForInstantSpeed();
-            bool inTransition = ModEntry.IsInTransition();
 
-            if (isSafe && !inTransition)
+            // Only apply high TimeScale if we are NOT in a transition lock.
+            if (isSafe)
             {
                 if (Engine.TimeScale != (double)ModEntry.FastSpeed)
                     Engine.TimeScale = (double)ModEntry.FastSpeed;
@@ -237,18 +233,23 @@ public static class TransitionPatch
     [HarmonyPrefix]
     static void FadeOutPrefix(ref float time)
     {
-        ModEntry.TransitionStartedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         if (ModEntry.IsEnabled)
         {
-            time = 1.0f; 
+            // We use a slightly longer time (0.5s real) to ensure stability
+            time = 0.5f; 
+            ModEntry.StartTransitionLock(time);
         }
     }
 
     [HarmonyPatch(nameof(NTransition.FadeIn))]
-    [HarmonyPostfix]
-    static void FadeInPostfix()
+    [HarmonyPrefix]
+    static void FadeInPrefix(ref float time)
     {
-        ModEntry.TransitionStartedAt = 0;
+        if (ModEntry.IsEnabled)
+        {
+            time = 0.5f;
+            ModEntry.StartTransitionLock(time);
+        }
     }
 }
 
