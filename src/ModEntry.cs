@@ -25,7 +25,9 @@ public static class ModEntry
     private static bool _logCleared = false;
     public const float FastSpeed = 10.0f;
     public static bool IsEnabled = true;
-    private static string _lastRoomName = "";
+    
+    // Sticky Safety Lock for PUNCH_OFF
+    private static bool _isRestrictedRoomActive = false;
 
     private static string GetLogPath()
     {
@@ -61,7 +63,7 @@ public static class ModEntry
         if (_initialized) return;
         _initialized = true;
 
-        LogDebug("v1.3.24 - Stability Fix (Quit-to-Menu)...");
+        LogDebug("v1.3.25 - Safety Lock Implementation (PUNCH_OFF)...");
 
         try {
             var harmony = new Harmony("com.instantmode.mod");
@@ -105,22 +107,39 @@ public static class ModEntry
         }
     }
 
-    public static bool IsEventRoom()
+    public static bool IsSafetyActive()
     {
         try {
-            var room = RunManager.Instance?.DebugOnlyGetState()?.CurrentRoom;
-            if (room == null) return false;
-            
-            string currentName = room.GetType().FullName;
-            if (currentName != _lastRoomName)
-            {
-                LogDebug($"[ROOM] Switched to: {currentName}");
-                _lastRoomName = currentName;
+            if (IsInTransition()) return true;
+
+            var state = RunManager.Instance?.DebugOnlyGetState();
+            if (state == null) return _isRestrictedRoomActive; // Sticky safety during Quit
+
+            var room = state.CurrentRoom;
+            if (room == null) return true;
+
+            // Detect the "Punch Off" room specifically
+            if (room is EventRoom er) {
+                string eventId = er.ModelId.ToString();
+                if (eventId.Contains("PUNCH_OFF")) {
+                    if (!_isRestrictedRoomActive) {
+                        LogDebug("ENTERING PUNCH_OFF: Safety Lock Engaged.");
+                        _isRestrictedRoomActive = true;
+                    }
+                    return true;
+                }
+                return true; // Safe default for all events
             }
 
-            return room is EventRoom;
-        } catch {
+            // If we are in any other room type (Combat, Shop, Map), release the lock
+            if (_isRestrictedRoomActive) {
+                LogDebug("LEAVING RESTRICTED ROOM: Safety Lock Released.");
+                _isRestrictedRoomActive = false;
+            }
+
             return false;
+        } catch {
+            return true; // Safety default on error
         }
     }
 
@@ -153,13 +172,7 @@ public static class FastModeGetterPatch
     {
         if (ModEntry.IsEnabled)
         {
-            if (ModEntry.IsInTransition())
-            {
-                __result = FastModeType.Fast;
-                return false;
-            }
-
-            if (ModEntry.IsEventRoom())
+            if (ModEntry.IsSafetyActive())
             {
                 __result = FastModeType.Fast;
                 return false;
@@ -182,8 +195,7 @@ public partial class SpeedManager : Node
             return;
         }
 
-        // Drop to 1.0x for Transitions AND EventRooms to ensure stability
-        if (ModEntry.IsEventRoom() || ModEntry.IsInTransition())
+        if (ModEntry.IsSafetyActive())
         {
             if (Engine.TimeScale != 1.0) {
                 Engine.TimeScale = 1.0;
@@ -207,7 +219,6 @@ public static class TransitionPatch
     {
         if (ModEntry.IsEnabled)
         {
-            ModEntry.LogDebug($"[TRANSITION] FadeOut requested. Room: {ModEntry.GetCurrentRoomName()}");
             time = 1.0f; 
         }
     }
@@ -218,7 +229,6 @@ public static class TransitionPatch
     {
         if (ModEntry.IsEnabled)
         {
-            ModEntry.LogDebug($"[TRANSITION] FadeIn requested. Room: {ModEntry.GetCurrentRoomName()}");
             time = 1.0f;
         }
     }
@@ -231,17 +241,9 @@ public static class CmdWaitPatch
     {
         if (ModEntry.IsEnabled)
         {
-            // NEW STABILITY RULE: Never bypass waits during transitions.
-            // This prevents race conditions during "Quit to Menu" where async tasks 
-            // might still be running while the scene is being disposed.
-            if (ModEntry.IsInTransition()) {
-                return true; 
+            if (ModEntry.IsSafetyActive()) {
+                return true; // Do NOT bypass waits when safety is active
             }
-
-            if (ModEntry.IsEventRoom()) {
-                return true; 
-            }
-            
             seconds = 0f;
         }
         return true;
@@ -255,7 +257,7 @@ public static class TweenSpeedPatch
     {
         if (ModEntry.IsEnabled && __result != null)
         {
-            if (!ModEntry.IsEventRoom() && !ModEntry.IsInTransition())
+            if (!ModEntry.IsSafetyActive())
             {
                 __result.SetSpeedScale(ModEntry.FastSpeed);
             }
