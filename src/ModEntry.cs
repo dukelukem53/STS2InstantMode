@@ -12,6 +12,7 @@ using MegaCrit.Sts2.Core.Nodes.Vfx;
 using MegaCrit.Sts2.Core.Extensions;
 using Godot;
 using System;
+using System.IO;
 using System.Reflection;
 using System.Diagnostics;
 
@@ -21,15 +22,46 @@ namespace InstantMode;
 public static class ModEntry
 {
     private static bool _initialized = false;
+    private static bool _logCleared = false;
     public const float FastSpeed = 10.0f;
     public static bool IsEnabled = true;
+    private static string _lastRoomName = "";
+
+    private static string GetLogPath()
+    {
+        try {
+            string assemblyPath = Assembly.GetExecutingAssembly().Location;
+            string modDir = Path.GetDirectoryName(assemblyPath);
+            return Path.Combine(modDir, "instant_mode_debug.log");
+        } catch {
+            return "instant_mode_debug.log";
+        }
+    }
+
+    public static void LogDebug(string msg)
+    {
+        string path = GetLogPath();
+        string timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff");
+        string fullMsg = $"[{timestamp}] {msg}";
+        
+        Log.Warn($"[InstantMode] {msg}");
+
+        try {
+            if (!_logCleared) {
+                File.WriteAllText(path, fullMsg + System.Environment.NewLine);
+                _logCleared = true;
+            } else {
+                File.AppendAllText(path, fullMsg + System.Environment.NewLine);
+            }
+        } catch {}
+    }
 
     public static void Init()
     {
         if (_initialized) return;
         _initialized = true;
 
-        Log.Warn("[InstantMode] Initializing with Smart FastMode (Anti-Flicker)...");
+        LogDebug("v1.3.22 - FORENSIC BASELINE LOGGING START...");
 
         try {
             var harmony = new Harmony("com.instantmode.mod");
@@ -41,9 +73,9 @@ public static class ModEntry
             manager.Name = "InstantModeSpeedManager";
             NGame.Instance?.CallDeferred(Node.MethodName.AddChild, manager);
 
-            Log.Warn("[InstantMode] Initialized. F8: Toggle Instant Mode.");
+            LogDebug("Init complete. Monitoring event chain.");
         } catch (Exception ex) {
-            Log.Error($"[InstantMode] FATAL INIT ERROR: {ex}");
+            LogDebug($"FATAL INIT ERROR: {ex}");
         }
     }
 
@@ -58,23 +90,42 @@ public static class ModEntry
             var prefix = AccessTools.Method(typeof(FastModeGetterPatch), nameof(FastModeGetterPatch.Prefix));
             harmony.Patch(getter, new HarmonyMethod(prefix));
         } catch (Exception ex) {
-            Log.Warn($"[InstantMode] Could not patch FastMode getter: {ex.Message}");
+            LogDebug($"Could not patch FastMode getter: {ex}");
         }
     }
 
     public static bool IsEventRoom()
     {
         try {
-            return RunManager.Instance?.DebugOnlyGetState()?.CurrentRoom is EventRoom;
+            var room = RunManager.Instance?.DebugOnlyGetState()?.CurrentRoom;
+            if (room == null) return false;
+            
+            string currentName = room.GetType().FullName;
+            if (currentName != _lastRoomName)
+            {
+                LogDebug($"[ROOM] Switched to: {currentName}");
+                _lastRoomName = currentName;
+            }
+
+            return room is EventRoom;
         } catch {
             return false;
+        }
+    }
+
+    public static string GetCurrentRoomName()
+    {
+        try {
+            return RunManager.Instance?.DebugOnlyGetState()?.CurrentRoom?.GetType().Name ?? "None";
+        } catch {
+            return "Error";
         }
     }
 
     public static void Toggle()
     {
         IsEnabled = !IsEnabled;
-        Log.Warn($"[InstantMode] Toggle -> {IsEnabled}");
+        LogDebug($"Toggle -> {IsEnabled}");
         
         if (NGame.Instance != null)
         {
@@ -91,16 +142,15 @@ public static class FastModeGetterPatch
     {
         if (ModEntry.IsEnabled)
         {
-            // Detect if we are in a transition or fade to prevent the "jump" flicker
             var stack = new StackTrace();
             string stackStr = stack.ToString();
+            
             if (stackStr.Contains("NTransition") || stackStr.Contains("Fade") || stackStr.Contains("RoomFade"))
             {
                 __result = FastModeType.Fast;
                 return false;
             }
 
-            // EXCEPTION: Return Fast for EventRoom to prevent crashes
             if (ModEntry.IsEventRoom())
             {
                 __result = FastModeType.Fast;
@@ -116,6 +166,8 @@ public static class FastModeGetterPatch
 
 public partial class SpeedManager : Node
 {
+    private int _frames = 0;
+
     public override void _Process(double delta)
     {
         if (!ModEntry.IsEnabled)
@@ -124,10 +176,14 @@ public partial class SpeedManager : Node
             return;
         }
 
-        // EXCEPTION: Use 1.0x for EventRoom to prevent crashes
-        if (ModEntry.IsEventRoom())
+        bool isEvent = ModEntry.IsEventRoom();
+        
+        if (isEvent)
         {
-            if (Engine.TimeScale != 1.0) Engine.TimeScale = 1.0;
+            if (Engine.TimeScale != 1.0) {
+                ModEntry.LogDebug("[SPEED] Event detected. Dropping to 1.0x.");
+                Engine.TimeScale = 1.0;
+            }
             return;
         }
 
@@ -147,7 +203,7 @@ public static class TransitionPatch
     {
         if (ModEntry.IsEnabled)
         {
-            // 1.0s / 10x speed = 0.1s visual snap.
+            ModEntry.LogDebug($"[TRANSITION] FadeOut requested. Room: {ModEntry.GetCurrentRoomName()}");
             time = 1.0f; 
         }
     }
@@ -158,8 +214,14 @@ public static class TransitionPatch
     {
         if (ModEntry.IsEnabled)
         {
+            ModEntry.LogDebug($"[TRANSITION] FadeIn requested. Room: {ModEntry.GetCurrentRoomName()}");
             time = 1.0f;
         }
+    }
+
+    // Helper for logging
+    private static string GetCurrentRoomName() {
+        try { return RunManager.Instance?.DebugOnlyGetState()?.CurrentRoom?.GetType().Name ?? "None"; } catch { return "Error"; }
     }
 }
 
@@ -170,6 +232,10 @@ public static class CmdWaitPatch
     {
         if (ModEntry.IsEnabled)
         {
+            // We only log significant waits to avoid log bloat
+            if (seconds > 0.1f && ModEntry.IsEventRoom()) {
+                ModEntry.LogDebug($"[CMD] Bypassing {seconds}s wait in EventRoom.");
+            }
             seconds = 0f;
         }
         return true;
@@ -183,7 +249,6 @@ public static class TweenSpeedPatch
     {
         if (ModEntry.IsEnabled && __result != null)
         {
-            // EXCEPTION: Don't accelerate Tweens in EventRoom
             if (!ModEntry.IsEventRoom())
             {
                 __result.SetSpeedScale(ModEntry.FastSpeed);
