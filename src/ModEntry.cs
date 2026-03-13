@@ -6,6 +6,7 @@ using MegaCrit.Sts2.Core.Runs;
 using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Commands;
 using MegaCrit.Sts2.Core.Settings;
+using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.Nodes.CommonUi;
 using MegaCrit.Sts2.Core.Nodes.Vfx;
 using MegaCrit.Sts2.Core.Extensions;
@@ -61,6 +62,15 @@ public static class ModEntry
         }
     }
 
+    public static bool IsEventRoom()
+    {
+        try {
+            return RunManager.Instance?.DebugOnlyGetState()?.CurrentRoom is EventRoom;
+        } catch {
+            return false;
+        }
+    }
+
     public static void Toggle()
     {
         IsEnabled = !IsEnabled;
@@ -90,6 +100,13 @@ public static class FastModeGetterPatch
                 return false;
             }
 
+            // EXCEPTION: Return Fast for EventRoom to prevent crashes
+            if (ModEntry.IsEventRoom())
+            {
+                __result = FastModeType.Fast;
+                return false;
+            }
+
             __result = FastModeType.Instant;
             return false;
         }
@@ -102,6 +119,13 @@ public partial class SpeedManager : Node
     public override void _Process(double delta)
     {
         if (!ModEntry.IsEnabled)
+        {
+            if (Engine.TimeScale != 1.0) Engine.TimeScale = 1.0;
+            return;
+        }
+
+        // EXCEPTION: Use 1.0x for EventRoom to prevent crashes
+        if (ModEntry.IsEventRoom())
         {
             if (Engine.TimeScale != 1.0) Engine.TimeScale = 1.0;
             return;
@@ -159,7 +183,11 @@ public static class TweenSpeedPatch
     {
         if (ModEntry.IsEnabled && __result != null)
         {
-            __result.SetSpeedScale(ModEntry.FastSpeed);
+            // EXCEPTION: Don't accelerate Tweens in EventRoom
+            if (!ModEntry.IsEventRoom())
+            {
+                __result.SetSpeedScale(ModEntry.FastSpeed);
+            }
         }
     }
 }
