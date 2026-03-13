@@ -7,6 +7,7 @@ using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Commands;
 using MegaCrit.Sts2.Core.Settings;
 using MegaCrit.Sts2.Core.Rooms;
+using MegaCrit.Sts2.Core.Nodes.Rooms;
 using MegaCrit.Sts2.Core.Nodes.CommonUi;
 using MegaCrit.Sts2.Core.Nodes.Vfx;
 using MegaCrit.Sts2.Core.Extensions;
@@ -62,7 +63,7 @@ public static class ModEntry
         if (_initialized) return;
         _initialized = true;
 
-        LogDebug("v1.3.26 - Zombie Task Protection (PUNCH_OFF Load Fix)...");
+        LogDebug("v1.3.28 - Deep Stability (Combat Sync + Load Fix)...");
 
         try {
             var harmony = new Harmony("com.instantmode.mod");
@@ -98,7 +99,7 @@ public static class ModEntry
     public static bool IsInTransition()
     {
         try {
-            var stack = new StackTrace();
+            var stack = new StackTrace(false);
             string stackStr = stack.ToString();
             return stackStr.Contains("NTransition") || stackStr.Contains("Fade") || stackStr.Contains("RoomFade");
         } catch {
@@ -109,40 +110,49 @@ public static class ModEntry
     public static bool IsSafetyActive()
     {
         try {
-            // 1. Transition/Fade is always safe
+            // 1. Core State Check
+            if (RunManager.Instance == null || !RunManager.Instance.IsInProgress || NGame.Instance == null) return true;
+
+            // 2. Transition Check
             if (IsInTransition()) return true;
 
-            // 2. Main Menu or Loading check (Stop mod until run is active)
-            if (NGame.Instance == null || RunManager.Instance == null || !RunManager.Instance.IsInProgress) return true;
-
             var state = RunManager.Instance.DebugOnlyGetState();
-            if (state == null) return _isRestrictedRoomActive;
+            if (state == null) return true;
 
             var room = state.CurrentRoom;
             if (room == null) return true;
 
-            // 3. Specific Event Blacklist
+            // 3. Event Blacklist
             if (room is EventRoom er) {
                 string eventId = er.ModelId.ToString();
                 if (eventId.Contains("PUNCH_OFF") || eventId.Contains("TINKER_TIME")) {
                     if (!_isRestrictedRoomActive) {
-                        LogDebug($"ENTERING RESTRICTED EVENT ({eventId}): Safety Lock Engaged.");
+                        LogDebug($"SAFETY ENGAGED: Restricted event detected ({eventId}).");
                         _isRestrictedRoomActive = true;
                     }
                     return true;
                 }
-                return true; // Safe default for all events
+                return true; // Default safety for all events
             }
 
-            // 4. Release lock if in Combat/Shop/Map
+            // 4. Release Lock
             if (_isRestrictedRoomActive) {
-                LogDebug("LEAVING RESTRICTED ROOM: Safety Lock Released.");
+                LogDebug("SAFETY RELEASED: Non-restricted room detected.");
                 _isRestrictedRoomActive = false;
             }
 
             return false;
         } catch {
             return true; 
+        }
+    }
+
+    public static string GetCurrentRoomName()
+    {
+        try {
+            return RunManager.Instance?.DebugOnlyGetState()?.CurrentRoom?.GetType().Name ?? "None";
+        } catch {
+            return "Error";
         }
     }
 
@@ -189,12 +199,21 @@ public partial class SpeedManager : Node
             return;
         }
 
+        // If safety is active, force 1.0x
         if (ModEntry.IsSafetyActive())
         {
-            if (Engine.TimeScale != 1.0) {
-                Engine.TimeScale = 1.0;
-            }
+            if (Engine.TimeScale != 1.0) Engine.TimeScale = 1.0;
             return;
+        }
+
+        // If we are in Combat, verify the combat room is actually active before speeding up
+        // This prevents the "Zombie Task" from being accelerated while the next room is pre-loading.
+        var room = RunManager.Instance?.DebugOnlyGetState()?.CurrentRoom;
+        if (room is CombatRoom) {
+            if (NCombatRoom.Instance == null || NCombatRoom.Instance.IsQueuedForDeletion()) {
+                if (Engine.TimeScale != 1.0) Engine.TimeScale = 1.0;
+                return;
+            }
         }
 
         if (Engine.TimeScale != (double)ModEntry.FastSpeed)
@@ -237,8 +256,6 @@ public static class CmdWaitPatch
         {
             if (ModEntry.IsSafetyActive()) return true;
 
-            // ZOMBIE TASK PROTECTION:
-            // Check if this wait originates from any background event task.
             var stack = new StackTrace(false);
             string stackStr = stack.ToString();
             if (stackStr.Contains("PunchOff") || stackStr.Contains("PunchEachOther") || stackStr.Contains("TinkerTime") || stackStr.Contains("Core.Models.Events")) {
