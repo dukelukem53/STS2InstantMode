@@ -13,7 +13,6 @@ using MegaCrit.Sts2.Core.Nodes.Vfx;
 using MegaCrit.Sts2.Core.Extensions;
 using Godot;
 using System;
-using System.IO;
 using System.Reflection;
 using System.Diagnostics;
 
@@ -23,47 +22,14 @@ namespace InstantMode;
 public static class ModEntry
 {
     private static bool _initialized = false;
-    private static bool _logCleared = false;
     public const float FastSpeed = 10.0f;
     public static bool IsEnabled = true;
-    
     private static bool _isRestrictedRoomActive = false;
-
-    private static string GetLogPath()
-    {
-        try {
-            string assemblyPath = Assembly.GetExecutingAssembly().Location;
-            string modDir = Path.GetDirectoryName(assemblyPath);
-            return Path.Combine(modDir, "instant_mode_debug.log");
-        } catch {
-            return "instant_mode_debug.log";
-        }
-    }
-
-    public static void LogDebug(string msg)
-    {
-        string path = GetLogPath();
-        string timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff");
-        string fullMsg = $"[{timestamp}] {msg}";
-        
-        Log.Warn($"[InstantMode] {msg}");
-
-        try {
-            if (!_logCleared) {
-                File.WriteAllText(path, fullMsg + System.Environment.NewLine);
-                _logCleared = true;
-            } else {
-                File.AppendAllText(path, fullMsg + System.Environment.NewLine);
-            }
-        } catch {}
-    }
 
     public static void Init()
     {
         if (_initialized) return;
         _initialized = true;
-
-        LogDebug("v1.3.28 - Deep Stability (Combat Sync + Load Fix)...");
 
         try {
             var harmony = new Harmony("com.instantmode.mod");
@@ -74,10 +40,8 @@ public static class ModEntry
             var manager = new SpeedManager();
             manager.Name = "InstantModeSpeedManager";
             NGame.Instance?.CallDeferred(Node.MethodName.AddChild, manager);
-
-            LogDebug("Init complete.");
         } catch (Exception ex) {
-            LogDebug($"FATAL INIT ERROR: {ex}");
+            Log.Error($"[InstantMode] FATAL INIT ERROR: {ex}");
         }
     }
 
@@ -91,9 +55,7 @@ public static class ModEntry
             var getter = fastModeProp.GetGetMethod();
             var prefix = AccessTools.Method(typeof(FastModeGetterPatch), nameof(FastModeGetterPatch.Prefix));
             harmony.Patch(getter, new HarmonyMethod(prefix));
-        } catch (Exception ex) {
-            LogDebug($"Could not patch FastMode getter: {ex}");
-        }
+        } catch {}
     }
 
     public static bool IsInTransition()
@@ -110,10 +72,7 @@ public static class ModEntry
     public static bool IsSafetyActive()
     {
         try {
-            // 1. Core State Check
             if (RunManager.Instance == null || !RunManager.Instance.IsInProgress || NGame.Instance == null) return true;
-
-            // 2. Transition Check
             if (IsInTransition()) return true;
 
             var state = RunManager.Instance.DebugOnlyGetState();
@@ -122,22 +81,16 @@ public static class ModEntry
             var room = state.CurrentRoom;
             if (room == null) return true;
 
-            // 3. Event Blacklist
             if (room is EventRoom er) {
                 string eventId = er.ModelId.ToString();
                 if (eventId.Contains("PUNCH_OFF") || eventId.Contains("TINKER_TIME")) {
-                    if (!_isRestrictedRoomActive) {
-                        LogDebug($"SAFETY ENGAGED: Restricted event detected ({eventId}).");
-                        _isRestrictedRoomActive = true;
-                    }
+                    _isRestrictedRoomActive = true;
                     return true;
                 }
-                return true; // Default safety for all events
+                return true; 
             }
 
-            // 4. Release Lock
             if (_isRestrictedRoomActive) {
-                LogDebug("SAFETY RELEASED: Non-restricted room detected.");
                 _isRestrictedRoomActive = false;
             }
 
@@ -147,20 +100,9 @@ public static class ModEntry
         }
     }
 
-    public static string GetCurrentRoomName()
-    {
-        try {
-            return RunManager.Instance?.DebugOnlyGetState()?.CurrentRoom?.GetType().Name ?? "None";
-        } catch {
-            return "Error";
-        }
-    }
-
     public static void Toggle()
     {
         IsEnabled = !IsEnabled;
-        LogDebug($"Toggle -> {IsEnabled}");
-        
         if (NGame.Instance != null)
         {
             try {
@@ -199,15 +141,12 @@ public partial class SpeedManager : Node
             return;
         }
 
-        // If safety is active, force 1.0x
         if (ModEntry.IsSafetyActive())
         {
             if (Engine.TimeScale != 1.0) Engine.TimeScale = 1.0;
             return;
         }
 
-        // If we are in Combat, verify the combat room is actually active before speeding up
-        // This prevents the "Zombie Task" from being accelerated while the next room is pre-loading.
         var room = RunManager.Instance?.DebugOnlyGetState()?.CurrentRoom;
         if (room is CombatRoom) {
             if (NCombatRoom.Instance == null || NCombatRoom.Instance.IsQueuedForDeletion()) {
