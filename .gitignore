@@ -1,0 +1,12 @@
+# .gitignore for InstantMode
+bin/
+obj/
+*.pck
+*.user
+*.log
+.DS_Store
+
+# Local development files
+*.dll
+GEMINI.md
+InstantMode_v*.zip
