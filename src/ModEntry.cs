@@ -29,42 +29,24 @@ public static class ModEntry
     public const float FastSpeed = 10.0f;
     public static bool IsEnabled = true;
     
-    // Performance Caching & Safety Hold
+    // Performance Caching
     private static long _lastCheckedFrame = -1;
     private static bool _isInTransitionCached = false;
-    private static long _safetyHoldUntil = 0;
 
     [ThreadStatic]
     private static bool _isCheckingState = false;
 
-    public static void TriggerSafetyHold(float seconds)
-    {
-        // Force safety hold for at least 300ms to allow room swap to settle
-        _safetyHoldUntil = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + (long)(seconds * 1000) + 300;
-    }
-
     public static bool IsInTransition()
     {
         try {
-            // Check 1: Real-time safety hold (triggered by room patches)
-            if (_safetyHoldUntil != 0)
-            {
-                if (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() < _safetyHoldUntil) return true;
-                _safetyHoldUntil = 0;
-            }
-
-            // Check 2: StackTrace-based detection (Frame-cached)
             long currentFrame = (long)Engine.GetFramesDrawn();
             if (currentFrame != _lastCheckedFrame)
             {
+                // REVERTED TO PERFECT V1.3.0 LOGIC:
+                // Only checking for NTransition in the stack.
                 var stack = new StackTrace(false);
                 string stackStr = stack.ToString();
-                
-                // SURGICAL FIX: We removed generic "Transition" which was catching card-draws.
-                // We only look for actual screen transition/fade keywords now.
-                _isInTransitionCached = stackStr.Contains("NTransition") || 
-                                       stackStr.Contains("Fade") || 
-                                       stackStr.Contains("RoomFade");
+                _isInTransitionCached = stackStr.Contains("NTransition");
                 _lastCheckedFrame = currentFrame;
             }
             return _isInTransitionCached;
@@ -78,14 +60,11 @@ public static class ModEntry
         if (_isCheckingState) return false;
         _isCheckingState = true;
         try {
-            // Priority 1: Room-swap Transitions are NEVER safe for instant speed (prevent flicker)
-            if (IsInTransition()) return false;
-
             if (RunManager.Instance == null) return true;
             var state = RunManager.Instance.DebugOnlyGetState();
             if (state?.CurrentRoom == null) return true;
             
-            // Priority 2: EventRoom safety exception
+            // Re-apply the EventRoom fix
             if (state.CurrentRoom is EventRoom) return false;
             
             return true;
@@ -130,7 +109,7 @@ public static class ModEntry
         if (_initialized) return;
         _initialized = true;
 
-        LogDebug("v1.3.17 - RESTORED GAMEPLAY SPEED (Surgical Anti-Flicker)...");
+        LogDebug("v1.3.18 - RESTORED PERFECT TRANSITIONS (v1.3.0 Logic + Event Fix)...");
 
         try {
             var harmony = new Harmony("com.instantmode.mod");
@@ -142,7 +121,7 @@ public static class ModEntry
             manager.Name = "InstantModeSpeedManager";
             NGame.Instance?.CallDeferred(Node.MethodName.AddChild, manager);
 
-            LogDebug("Init complete. Card drawing and combat speed restored.");
+            LogDebug("Init complete. Original visual smoothness restored.");
         } catch (Exception ex) {
             LogDebug($"FATAL INIT ERROR: {ex}");
         }
@@ -153,7 +132,8 @@ public static class ModEntry
         try {
             var saveManagerType = AccessTools.TypeByName("MegaCrit.Sts2.Core.Saves.SaveManager");
             var prefsSaveProp = AccessTools.Property(saveManagerType, "PrefsSave");
-            var fastModeProp = AccessTools.Property(prefsSaveProp.PropertyType, "FastMode");
+            var prefsSaveType = prefsSaveProp.PropertyType;
+            var fastModeProp = AccessTools.Property(prefsSaveType, "FastMode");
             var getter = fastModeProp.GetGetMethod();
             var prefix = AccessTools.Method(typeof(FastModeGetterPatch), nameof(FastModeGetterPatch.Prefix));
             harmony.Patch(getter, new HarmonyMethod(prefix));
@@ -167,7 +147,6 @@ public static class ModEntry
         try {
             IsEnabled = !IsEnabled;
             LogDebug($"Toggle -> {IsEnabled}");
-            _safetyHoldUntil = 0;
             if (NGame.Instance != null)
             {
                 NGame.Instance.AddChild(NFullscreenTextVfx.Create(IsEnabled ? "Instant Mode: ON" : "Instant Mode: OFF"));
@@ -190,6 +169,14 @@ public static class FastModeGetterPatch
 
         _isInsideGetter = true;
         try {
+            // Priority 1: Perfect v1.3.0 StackTrace logic
+            if (ModEntry.IsInTransition())
+            {
+                __result = FastModeType.Fast;
+                return false;
+            }
+            
+            // Priority 2: EventRoom stability
             if (!ModEntry.IsSafeForInstantSpeed())
             {
                 __result = FastModeType.Fast;
@@ -215,7 +202,10 @@ public partial class SpeedManager : Node
                 return;
             }
 
-            if (ModEntry.IsSafeForInstantSpeed())
+            bool isSafe = ModEntry.IsSafeForInstantSpeed();
+            bool inTransition = ModEntry.IsInTransition();
+
+            if (isSafe && !inTransition)
             {
                 if (Engine.TimeScale != (double)ModEntry.FastSpeed)
                     Engine.TimeScale = (double)ModEntry.FastSpeed;
@@ -238,8 +228,8 @@ public static class TransitionPatch
     {
         if (ModEntry.IsEnabled)
         {
-            time = 0.5f; 
-            ModEntry.TriggerSafetyHold(time);
+            // REVERTED: 1.0s is the proven perfect time for room swaps.
+            time = 1.0f; 
         }
     }
 
@@ -249,8 +239,7 @@ public static class TransitionPatch
     {
         if (ModEntry.IsEnabled)
         {
-            time = 0.5f;
-            ModEntry.TriggerSafetyHold(time);
+            time = 1.0f;
         }
     }
 }
@@ -264,6 +253,7 @@ public static class CmdWaitPatch
     {
         if (ModEntry.IsEnabled && seconds > 0f)
         {
+            // Safety: Using 0.01s for stability
             seconds = 0.01f;
         }
     }
