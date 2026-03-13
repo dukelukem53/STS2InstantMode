@@ -238,12 +238,10 @@ public static class CmdWaitPatch
             if (ModEntry.IsSafetyActive()) return true;
 
             // ZOMBIE TASK PROTECTION:
-            // Check if this wait originates from a background event task.
-            // If it does, we MUST NOT bypass it, otherwise the task will spin 
-            // at infinite speed during room transitions and crash the game.
+            // Check if this wait originates from any background event task.
             var stack = new StackTrace(false);
             string stackStr = stack.ToString();
-            if (stackStr.Contains("PunchEachOther") || stackStr.Contains("TinkerTime")) {
+            if (stackStr.Contains("PunchOff") || stackStr.Contains("PunchEachOther") || stackStr.Contains("TinkerTime") || stackStr.Contains("Core.Models.Events")) {
                 return true; 
             }
 
