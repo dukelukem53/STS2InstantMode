@@ -26,7 +26,6 @@ public static class ModEntry
     public const float FastSpeed = 10.0f;
     public static bool IsEnabled = true;
     
-    // Sticky Safety Lock for PUNCH_OFF
     private static bool _isRestrictedRoomActive = false;
 
     private static string GetLogPath()
@@ -63,7 +62,7 @@ public static class ModEntry
         if (_initialized) return;
         _initialized = true;
 
-        LogDebug("v1.3.25 - Safety Lock Implementation (PUNCH_OFF)...");
+        LogDebug("v1.3.26 - Zombie Task Protection (PUNCH_OFF Load Fix)...");
 
         try {
             var harmony = new Harmony("com.instantmode.mod");
@@ -110,20 +109,24 @@ public static class ModEntry
     public static bool IsSafetyActive()
     {
         try {
+            // 1. Transition/Fade is always safe
             if (IsInTransition()) return true;
 
-            var state = RunManager.Instance?.DebugOnlyGetState();
-            if (state == null) return _isRestrictedRoomActive; // Sticky safety during Quit
+            // 2. Main Menu or Loading check (Stop mod until run is active)
+            if (NGame.Instance == null || RunManager.Instance == null || !RunManager.Instance.IsInProgress) return true;
+
+            var state = RunManager.Instance.DebugOnlyGetState();
+            if (state == null) return _isRestrictedRoomActive;
 
             var room = state.CurrentRoom;
             if (room == null) return true;
 
-            // Detect the "Punch Off" room specifically
+            // 3. Specific Event Blacklist
             if (room is EventRoom er) {
                 string eventId = er.ModelId.ToString();
-                if (eventId.Contains("PUNCH_OFF")) {
+                if (eventId.Contains("PUNCH_OFF") || eventId.Contains("TINKER_TIME")) {
                     if (!_isRestrictedRoomActive) {
-                        LogDebug("ENTERING PUNCH_OFF: Safety Lock Engaged.");
+                        LogDebug($"ENTERING RESTRICTED EVENT ({eventId}): Safety Lock Engaged.");
                         _isRestrictedRoomActive = true;
                     }
                     return true;
@@ -131,7 +134,7 @@ public static class ModEntry
                 return true; // Safe default for all events
             }
 
-            // If we are in any other room type (Combat, Shop, Map), release the lock
+            // 4. Release lock if in Combat/Shop/Map
             if (_isRestrictedRoomActive) {
                 LogDebug("LEAVING RESTRICTED ROOM: Safety Lock Released.");
                 _isRestrictedRoomActive = false;
@@ -139,16 +142,7 @@ public static class ModEntry
 
             return false;
         } catch {
-            return true; // Safety default on error
-        }
-    }
-
-    public static string GetCurrentRoomName()
-    {
-        try {
-            return RunManager.Instance?.DebugOnlyGetState()?.CurrentRoom?.GetType().Name ?? "None";
-        } catch {
-            return "Error";
+            return true; 
         }
     }
 
@@ -241,9 +235,18 @@ public static class CmdWaitPatch
     {
         if (ModEntry.IsEnabled)
         {
-            if (ModEntry.IsSafetyActive()) {
-                return true; // Do NOT bypass waits when safety is active
+            if (ModEntry.IsSafetyActive()) return true;
+
+            // ZOMBIE TASK PROTECTION:
+            // Check if this wait originates from a background event task.
+            // If it does, we MUST NOT bypass it, otherwise the task will spin 
+            // at infinite speed during room transitions and crash the game.
+            var stack = new StackTrace(false);
+            string stackStr = stack.ToString();
+            if (stackStr.Contains("PunchEachOther") || stackStr.Contains("TinkerTime")) {
+                return true; 
             }
+
             seconds = 0f;
         }
         return true;
