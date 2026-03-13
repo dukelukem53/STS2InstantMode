@@ -232,9 +232,9 @@ public static class CmdWaitPatch
     {
         if (ModEntry.IsEnabled)
         {
-            // We only log significant waits to avoid log bloat
-            if (seconds > 0.1f && ModEntry.IsEventRoom()) {
-                ModEntry.LogDebug($"[CMD] Bypassing {seconds}s wait in EventRoom.");
+            if (ModEntry.IsEventRoom()) {
+                // Do NOT bypass waits in events - the game's state machine needs them.
+                return true; 
             }
             seconds = 0f;
         }
