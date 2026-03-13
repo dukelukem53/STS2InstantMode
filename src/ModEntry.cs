@@ -15,6 +15,7 @@ using Godot;
 using System;
 using System.IO;
 using System.Reflection;
+using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -28,51 +29,44 @@ public static class ModEntry
     public const float FastSpeed = 10.0f;
     public static bool IsEnabled = true;
     
-    // Use a real-time timestamp to create a "Lockout" period for transitions
-    private static long _transitionLockUntil = 0;
-
-    public static void StartTransitionLock(float durationSeconds)
-    {
-        // We lock the speed to 1.0x for slightly longer than the transition itself
-        long bufferMs = 200; 
-        _transitionLockUntil = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + (long)(durationSeconds * 1000) + bufferMs;
-    }
-
-    public static bool IsInTransitionLock()
-    {
-        if (_transitionLockUntil == 0) return false;
-        long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-        if (now > _transitionLockUntil)
-        {
-            _transitionLockUntil = 0;
-            return false;
-        }
-        return true;
-    }
+    // Performance Caching
+    private static long _lastCheckedFrame = -1;
+    private static bool _isInTransitionCached = false;
 
     [ThreadStatic]
     private static bool _isCheckingState = false;
+
+    public static bool IsInTransition()
+    {
+        try {
+            long currentFrame = (long)Engine.GetFramesDrawn();
+            if (currentFrame != _lastCheckedFrame)
+            {
+                // SMART DETECTION: This was the only method that perfectly stopped the flicker.
+                // We use frame-caching to prevent the CPU-spam crash.
+                var stack = new StackTrace(false);
+                string stackStr = stack.ToString();
+                _isInTransitionCached = stackStr.Contains("NTransition") || 
+                                       stackStr.Contains("Fade") || 
+                                       stackStr.Contains("RoomFade");
+                _lastCheckedFrame = currentFrame;
+            }
+            return _isInTransitionCached;
+        } catch {
+            return false;
+        }
+    }
 
     public static bool IsSafeForInstantSpeed()
     {
         if (_isCheckingState) return false;
         _isCheckingState = true;
         try {
-            // Priority 1: If we are in a transition lock, it is NOT safe for instant speed.
-            if (IsInTransitionLock()) return false;
-
-            // Priority 2: Combat Room check
-            if (NCombatRoom.Instance != null && !NCombatRoom.Instance.IsQueuedForDeletion()) 
-            {
-                if (CombatManager.Instance != null && CombatManager.Instance.IsEnding) return false;
-                return true;
-            }
-
-            // Priority 3: Event check
             if (RunManager.Instance == null) return true;
             var state = RunManager.Instance.DebugOnlyGetState();
             if (state?.CurrentRoom == null) return true;
             
+            // Re-apply the EventRoom fix
             if (state.CurrentRoom is EventRoom) return false;
             
             return true;
@@ -117,7 +111,7 @@ public static class ModEntry
         if (_initialized) return;
         _initialized = true;
 
-        LogDebug("v1.3.14 - FIXED TRANSITION FADES (Time-Locked Logic)...");
+        LogDebug("v1.3.15 - REINSTATED SMART STACKTRACE (Frame-Cached)...");
 
         try {
             var harmony = new Harmony("com.instantmode.mod");
@@ -129,7 +123,7 @@ public static class ModEntry
             manager.Name = "InstantModeSpeedManager";
             NGame.Instance?.CallDeferred(Node.MethodName.AddChild, manager);
 
-            LogDebug("Init complete. Transitions now hardware-timed for smoothness.");
+            LogDebug("Init complete. Original anti-flicker reinstated with performance safety.");
         } catch (Exception ex) {
             LogDebug($"FATAL INIT ERROR: {ex}");
         }
@@ -140,7 +134,8 @@ public static class ModEntry
         try {
             var saveManagerType = AccessTools.TypeByName("MegaCrit.Sts2.Core.Saves.SaveManager");
             var prefsSaveProp = AccessTools.Property(saveManagerType, "PrefsSave");
-            var fastModeProp = AccessTools.Property(prefsSaveProp.PropertyType, "FastMode");
+            var prefsSaveType = prefsSaveProp.PropertyType;
+            var fastModeProp = AccessTools.Property(prefsSaveType, "FastMode");
             var getter = fastModeProp.GetGetMethod();
             var prefix = AccessTools.Method(typeof(FastModeGetterPatch), nameof(FastModeGetterPatch.Prefix));
             harmony.Patch(getter, new HarmonyMethod(prefix));
@@ -154,7 +149,6 @@ public static class ModEntry
         try {
             IsEnabled = !IsEnabled;
             LogDebug($"Toggle -> {IsEnabled}");
-            _transitionLockUntil = 0;
             if (NGame.Instance != null)
             {
                 NGame.Instance.AddChild(NFullscreenTextVfx.Create(IsEnabled ? "Instant Mode: ON" : "Instant Mode: OFF"));
@@ -177,13 +171,14 @@ public static class FastModeGetterPatch
 
         _isInsideGetter = true;
         try {
-            // We use the transition lock to force "Fast" mode (returning the fades).
-            if (ModEntry.IsInTransitionLock())
+            // Priority 1: Use the original Smart StackTrace logic
+            if (ModEntry.IsInTransition())
             {
                 __result = FastModeType.Fast;
                 return false;
             }
             
+            // Priority 2: Maintain the EventRoom stability fix
             if (!ModEntry.IsSafeForInstantSpeed())
             {
                 __result = FastModeType.Fast;
@@ -210,9 +205,9 @@ public partial class SpeedManager : Node
             }
 
             bool isSafe = ModEntry.IsSafeForInstantSpeed();
+            bool inTransition = ModEntry.IsInTransition();
 
-            // Only apply high TimeScale if we are NOT in a transition lock.
-            if (isSafe)
+            if (isSafe && !inTransition)
             {
                 if (Engine.TimeScale != (double)ModEntry.FastSpeed)
                     Engine.TimeScale = (double)ModEntry.FastSpeed;
@@ -235,9 +230,7 @@ public static class TransitionPatch
     {
         if (ModEntry.IsEnabled)
         {
-            // We use a slightly longer time (0.5s real) to ensure stability
-            time = 0.5f; 
-            ModEntry.StartTransitionLock(time);
+            time = 1.0f; // 0.1s visual fade
         }
     }
 
@@ -247,8 +240,7 @@ public static class TransitionPatch
     {
         if (ModEntry.IsEnabled)
         {
-            time = 0.5f;
-            ModEntry.StartTransitionLock(time);
+            time = 1.0f;
         }
     }
 }
