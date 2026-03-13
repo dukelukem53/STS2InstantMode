@@ -46,7 +46,7 @@ public static class ModEntry
     public static bool IsInTransition()
     {
         try {
-            // Check 1: Real-time safety hold
+            // Check 1: Real-time safety hold (triggered by room patches)
             if (_safetyHoldUntil != 0)
             {
                 if (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() < _safetyHoldUntil) return true;
@@ -59,10 +59,12 @@ public static class ModEntry
             {
                 var stack = new StackTrace(false);
                 string stackStr = stack.ToString();
+                
+                // SURGICAL FIX: We removed generic "Transition" which was catching card-draws.
+                // We only look for actual screen transition/fade keywords now.
                 _isInTransitionCached = stackStr.Contains("NTransition") || 
                                        stackStr.Contains("Fade") || 
-                                       stackStr.Contains("RoomFade") ||
-                                       stackStr.Contains("Transition");
+                                       stackStr.Contains("RoomFade");
                 _lastCheckedFrame = currentFrame;
             }
             return _isInTransitionCached;
@@ -76,13 +78,14 @@ public static class ModEntry
         if (_isCheckingState) return false;
         _isCheckingState = true;
         try {
-            // Transitions are NEVER safe for instant speed (prevent flicker)
+            // Priority 1: Room-swap Transitions are NEVER safe for instant speed (prevent flicker)
             if (IsInTransition()) return false;
 
             if (RunManager.Instance == null) return true;
             var state = RunManager.Instance.DebugOnlyGetState();
             if (state?.CurrentRoom == null) return true;
             
+            // Priority 2: EventRoom safety exception
             if (state.CurrentRoom is EventRoom) return false;
             
             return true;
@@ -127,7 +130,7 @@ public static class ModEntry
         if (_initialized) return;
         _initialized = true;
 
-        LogDebug("v1.3.16 - IRONCLAD ANTI-FLICKER (Safety-Hold Reinstated)...");
+        LogDebug("v1.3.17 - RESTORED GAMEPLAY SPEED (Surgical Anti-Flicker)...");
 
         try {
             var harmony = new Harmony("com.instantmode.mod");
@@ -139,7 +142,7 @@ public static class ModEntry
             manager.Name = "InstantModeSpeedManager";
             NGame.Instance?.CallDeferred(Node.MethodName.AddChild, manager);
 
-            LogDebug("Init complete. Transitions now hardware-buffered for perfect smoothness.");
+            LogDebug("Init complete. Card drawing and combat speed restored.");
         } catch (Exception ex) {
             LogDebug($"FATAL INIT ERROR: {ex}");
         }
@@ -235,7 +238,7 @@ public static class TransitionPatch
     {
         if (ModEntry.IsEnabled)
         {
-            time = 0.5f; // Real-world duration
+            time = 0.5f; 
             ModEntry.TriggerSafetyHold(time);
         }
     }
