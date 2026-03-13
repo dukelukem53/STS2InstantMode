@@ -27,5 +27,8 @@ Persistence is better handled by a simple `Node` in the game tree than by comple
 ### 2. Instant Mode Trade-offs
 While `FastModeType.Instant` is the fastest possible mode, it bypasses visual transitions. This is the intended behavior for "Instant Mode" users who prioritize speed over visual fluidity.
 
+### 3. Attribution Style
+Documentation for this mod intentionally uses the line `*Created with AI because I'm lazy*` instead of standard author credits to maintain transparency regarding the development process.
+
 ## Roadmap / Next Steps
 - **Configurability**: Move the `10.0x` constant and toggle key to a settings file.

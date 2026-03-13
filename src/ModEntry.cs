@@ -12,6 +12,7 @@ using MegaCrit.Sts2.Core.Extensions;
 using Godot;
 using System;
 using System.Reflection;
+using System.Diagnostics;
 
 namespace InstantMode;
 
@@ -27,7 +28,7 @@ public static class ModEntry
         if (_initialized) return;
         _initialized = true;
 
-        Log.Warn("[InstantMode] Initializing...");
+        Log.Warn("[InstantMode] Initializing with Smart FastMode (Anti-Flicker)...");
 
         try {
             var harmony = new Harmony("com.instantmode.mod");
@@ -35,7 +36,6 @@ public static class ModEntry
             
             TryPatchFastMode(harmony);
             
-            // Add a headless node to manage speed persistence
             var manager = new SpeedManager();
             manager.Name = "InstantModeSpeedManager";
             NGame.Instance?.CallDeferred(Node.MethodName.AddChild, manager);
@@ -60,6 +60,19 @@ public static class ModEntry
             Log.Warn($"[InstantMode] Could not patch FastMode getter: {ex.Message}");
         }
     }
+
+    public static void Toggle()
+    {
+        IsEnabled = !IsEnabled;
+        Log.Warn($"[InstantMode] Toggle -> {IsEnabled}");
+        
+        if (NGame.Instance != null)
+        {
+            try {
+                NGame.Instance.AddChild(NFullscreenTextVfx.Create(IsEnabled ? "Instant Mode: ON" : "Instant Mode: OFF"));
+            } catch {}
+        }
+    }
 }
 
 public static class FastModeGetterPatch
@@ -68,7 +81,15 @@ public static class FastModeGetterPatch
     {
         if (ModEntry.IsEnabled)
         {
-            // Reverting to True Instant as requested
+            // Detect if we are in a transition or fade to prevent the "jump" flicker
+            var stack = new StackTrace();
+            string stackStr = stack.ToString();
+            if (stackStr.Contains("NTransition") || stackStr.Contains("Fade") || stackStr.Contains("RoomFade"))
+            {
+                __result = FastModeType.Fast;
+                return false;
+            }
+
             __result = FastModeType.Instant;
             return false;
         }
@@ -89,6 +110,31 @@ public partial class SpeedManager : Node
         if (Engine.TimeScale != (double)ModEntry.FastSpeed)
         {
             Engine.TimeScale = (double)ModEntry.FastSpeed;
+        }
+    }
+}
+
+[HarmonyPatch(typeof(NTransition))]
+public static class TransitionPatch
+{
+    [HarmonyPatch(nameof(NTransition.FadeOut))]
+    [HarmonyPrefix]
+    static void FadeOutPrefix(ref float time)
+    {
+        if (ModEntry.IsEnabled)
+        {
+            // 1.0s / 10x speed = 0.1s visual snap.
+            time = 1.0f; 
+        }
+    }
+
+    [HarmonyPatch(nameof(NTransition.FadeIn))]
+    [HarmonyPrefix]
+    static void FadeInPrefix(ref float time)
+    {
+        if (ModEntry.IsEnabled)
+        {
+            time = 1.0f;
         }
     }
 }
@@ -127,15 +173,7 @@ public static class InputPatch
         {
             if (keyEvent.Keycode == Key.F8)
             {
-                ModEntry.IsEnabled = !ModEntry.IsEnabled;
-                Log.Warn($"[InstantMode] Toggle -> {ModEntry.IsEnabled}");
-                
-                if (NGame.Instance != null)
-                {
-                    try {
-                        NGame.Instance.AddChild(NFullscreenTextVfx.Create(ModEntry.IsEnabled ? "Instant Mode: ON" : "Instant Mode: OFF"));
-                    } catch {}
-                }
+                ModEntry.Toggle();
             }
         }
     }
