@@ -42,8 +42,7 @@ public static class ModEntry
             long currentFrame = (long)Engine.GetFramesDrawn();
             if (currentFrame != _lastCheckedFrame)
             {
-                // REVERTED TO PERFECT V1.3.0 LOGIC:
-                // Only checking for NTransition in the stack.
+                // RE-IMPLEMENTING PERFECT V1.3.0 LOGIC
                 var stack = new StackTrace(false);
                 string stackStr = stack.ToString();
                 _isInTransitionCached = stackStr.Contains("NTransition");
@@ -64,7 +63,7 @@ public static class ModEntry
             var state = RunManager.Instance.DebugOnlyGetState();
             if (state?.CurrentRoom == null) return true;
             
-            // Re-apply the EventRoom fix
+            // EXCEPTION: EventRoom stability fix
             if (state.CurrentRoom is EventRoom) return false;
             
             return true;
@@ -109,7 +108,7 @@ public static class ModEntry
         if (_initialized) return;
         _initialized = true;
 
-        LogDebug("v1.3.18 - RESTORED PERFECT TRANSITIONS (v1.3.0 Logic + Event Fix)...");
+        LogDebug("v1.3.19 - FINAL SYNC (v1.3.0 Anti-Flicker + Event Stability)...");
 
         try {
             var harmony = new Harmony("com.instantmode.mod");
@@ -121,7 +120,7 @@ public static class ModEntry
             manager.Name = "InstantModeSpeedManager";
             NGame.Instance?.CallDeferred(Node.MethodName.AddChild, manager);
 
-            LogDebug("Init complete. Original visual smoothness restored.");
+            LogDebug("Init complete. Restoring 10x Transition Speed.");
         } catch (Exception ex) {
             LogDebug($"FATAL INIT ERROR: {ex}");
         }
@@ -132,8 +131,7 @@ public static class ModEntry
         try {
             var saveManagerType = AccessTools.TypeByName("MegaCrit.Sts2.Core.Saves.SaveManager");
             var prefsSaveProp = AccessTools.Property(saveManagerType, "PrefsSave");
-            var prefsSaveType = prefsSaveProp.PropertyType;
-            var fastModeProp = AccessTools.Property(prefsSaveType, "FastMode");
+            var fastModeProp = AccessTools.Property(prefsSaveProp.PropertyType, "FastMode");
             var getter = fastModeProp.GetGetMethod();
             var prefix = AccessTools.Method(typeof(FastModeGetterPatch), nameof(FastModeGetterPatch.Prefix));
             harmony.Patch(getter, new HarmonyMethod(prefix));
@@ -169,20 +167,21 @@ public static class FastModeGetterPatch
 
         _isInsideGetter = true;
         try {
-            // Priority 1: Perfect v1.3.0 StackTrace logic
+            // STEP 1: If in transition, return Fast (Enables the 1.0s fade logic)
             if (ModEntry.IsInTransition())
             {
                 __result = FastModeType.Fast;
                 return false;
             }
             
-            // Priority 2: EventRoom stability
+            // STEP 2: If in EventRoom, return Fast (Ensures stability)
             if (!ModEntry.IsSafeForInstantSpeed())
             {
                 __result = FastModeType.Fast;
                 return false;
             }
 
+            // STEP 3: Default to Instant for maximum speed
             __result = FastModeType.Instant;
             return false;
         } finally {
@@ -202,16 +201,16 @@ public partial class SpeedManager : Node
                 return;
             }
 
-            bool isSafe = ModEntry.IsSafeForInstantSpeed();
-            bool inTransition = ModEntry.IsInTransition();
-
-            if (isSafe && !inTransition)
+            // CRITICAL REVERT: Transitions MUST stay at 10.0x speed.
+            // This compresses the 1.0s fade into 0.1s real-time (The Sweet Spot).
+            if (ModEntry.IsSafeForInstantSpeed())
             {
                 if (Engine.TimeScale != (double)ModEntry.FastSpeed)
                     Engine.TimeScale = (double)ModEntry.FastSpeed;
             }
             else
             {
+                // Only slow down for EventRooms (Stability)
                 if (Engine.TimeScale != 1.0)
                     Engine.TimeScale = 1.0;
             }
@@ -228,8 +227,7 @@ public static class TransitionPatch
     {
         if (ModEntry.IsEnabled)
         {
-            // REVERTED: 1.0s is the proven perfect time for room swaps.
-            time = 1.0f; 
+            time = 1.0f; // 0.1s real-time at 10x speed
         }
     }
 
@@ -253,7 +251,6 @@ public static class CmdWaitPatch
     {
         if (ModEntry.IsEnabled && seconds > 0f)
         {
-            // Safety: Using 0.01s for stability
             seconds = 0.01f;
         }
     }
@@ -278,6 +275,7 @@ public static class TweenSpeedPatch
         try {
             if (ModEntry.IsEnabled && __result != null)
             {
+                // Accelerate all tweens except in EventRooms
                 if (ModEntry.IsSafeForInstantSpeed())
                 {
                     __result.SetSpeedScale(ModEntry.FastSpeed);
