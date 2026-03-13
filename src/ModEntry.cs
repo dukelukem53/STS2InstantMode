@@ -36,14 +36,28 @@ public static class ModEntry
 
     public static bool IsInTransition()
     {
-        if (TransitionStartedAt == 0) return false;
-        long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-        if (now - TransitionStartedAt > TransitionExpiryMs)
-        {
-            TransitionStartedAt = 0;
-            return false;
+        if (_isCheckingState) return false;
+        _isCheckingState = true;
+        try {
+            // ULTIMATE GROUND TRUTH: If the NTransition node exists and is visible, we ARE in a transition.
+            // This is perfectly synced with the game's actual screen state.
+            if (NTransition.Instance != null && !NTransition.Instance.IsQueuedForDeletion())
+            {
+                return true;
+            }
+
+            // FALLBACK: Timestamp-based expiry
+            if (TransitionStartedAt == 0) return false;
+            long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            if (now - TransitionStartedAt > TransitionExpiryMs)
+            {
+                TransitionStartedAt = 0;
+                return false;
+            }
+            return true;
+        } finally {
+            _isCheckingState = false;
         }
-        return true;
     }
 
     public static bool IsSafeForInstantSpeed()
@@ -52,7 +66,6 @@ public static class ModEntry
         _isCheckingState = true;
         try {
             // PROACTIVE CHECK 1: If the Godot Scene Tree has a CombatRoom, we are in combat.
-            // This is much faster and more reactive than waiting for RunManager state to update.
             if (NCombatRoom.Instance != null && !NCombatRoom.Instance.IsQueuedForDeletion()) 
             {
                 if (CombatManager.Instance != null && CombatManager.Instance.IsEnding) return false;
@@ -65,8 +78,6 @@ public static class ModEntry
             if (state?.CurrentRoom == null) return true;
             
             var room = state.CurrentRoom;
-            
-            // Explicitly exclude only EventRoom
             if (room is EventRoom) return false;
             
             return true;
@@ -111,7 +122,7 @@ public static class ModEntry
         if (_initialized) return;
         _initialized = true;
 
-        LogDebug("v1.3.12 - REACTIVE SCENE-BASED SPEED (Fixed Room-Entry Lag)...");
+        LogDebug("v1.3.13 - SCENE-SYNCED ANTI-FLICKER (NTransition Detection)...");
 
         try {
             var harmony = new Harmony("com.instantmode.mod");
@@ -123,7 +134,7 @@ public static class ModEntry
             manager.Name = "InstantModeSpeedManager";
             NGame.Instance?.CallDeferred(Node.MethodName.AddChild, manager);
 
-            LogDebug("Init complete. Speed will now kick in immediately on Combat load.");
+            LogDebug("Init complete. Flicker-prevention now visually synced.");
         } catch (Exception ex) {
             LogDebug($"FATAL INIT ERROR: {ex}");
         }
@@ -193,8 +204,6 @@ public static class FastModeGetterPatch
 
 public partial class SpeedManager : Node
 {
-    private bool _lastState = false;
-
     public override void _Process(double delta)
     {
         try {
@@ -206,11 +215,6 @@ public partial class SpeedManager : Node
 
             bool isSafe = ModEntry.IsSafeForInstantSpeed();
             bool inTransition = ModEntry.IsInTransition();
-
-            if (isSafe != _lastState) {
-                // ModEntry.LogDebug($"[SPEED] Safe state changed: {isSafe}");
-                _lastState = isSafe;
-            }
 
             if (isSafe && !inTransition)
             {
